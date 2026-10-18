@@ -1,0 +1,151 @@
+import os
+import shutil
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+import matplotlib.pyplot as plt
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout
+from sklearn.metrics import classification_report, confusion_matrix, roc_curve, auc
+from sklearn.preprocessing import label_binarize
+
+base_path = "C:/Users/Quantum/Downloads/archive/datasets"
+img_dir = os.path.join(base_path, "train", "images")
+lbl_dir = os.path.join(base_path, "train", "labels")
+organized_dir = os.path.join(base_path, "organized_train")
+split_dir = os.path.join(base_path, "organized_split")
+train_dir = os.path.join(split_dir, "train")
+test_dir = os.path.join(split_dir, "test")
+
+label_map = {
+    0: 'ا', 1: 'ب', 2: 'ت', 3: 'ث', 4: 'ج', 5: 'ح', 6: 'خ', 7: 'د', 8: 'ذ', 9: 'ر',
+    10: 'ز', 11: 'س', 12: 'ش', 13: 'ص', 14: 'ض', 15: 'ط', 16: 'ظ', 17: 'ع', 18: 'غ',
+    19: 'ف', 20: 'ق', 21: 'ك', 22: 'ل', 23: 'م', 24: 'ن', 25: 'هـ', 26: 'و', 27: 'ي'
+}
+
+os.makedirs(organized_dir, exist_ok=True)
+
+for filename in os.listdir(lbl_dir):
+    if filename.endswith(".txt"):
+        with open(os.path.join(lbl_dir, filename), encoding='utf-8') as f:
+            content = f.readline().strip()
+            if content == '':
+                continue
+            label_num = int(content.split()[0])
+            label_char = label_map.get(label_num)
+            if label_char is None:
+                continue
+            dest_folder = os.path.join(organized_dir, label_char)
+            os.makedirs(dest_folder, exist_ok=True)
+            img_name = filename.replace(".txt", ".jpg")
+            src_img_path = os.path.join(img_dir, img_name)
+            if os.path.exists(src_img_path):
+                shutil.copy(src_img_path, os.path.join(dest_folder, img_name))
+            else:
+                print(f"Missing image: {img_name}")
+
+train_ratio = 0.8
+os.makedirs(split_dir, exist_ok=True)
+os.makedirs(train_dir, exist_ok=True)
+os.makedirs(test_dir, exist_ok=True)
+
+for class_name in os.listdir(organized_dir):
+    class_path = os.path.join(organized_dir, class_name)
+    if not os.path.isdir(class_path):
+        continue
+
+    images = [f for f in os.listdir(class_path) if f.endswith('.jpg')]
+    np.random.shuffle(images)
+
+    split_idx = int(len(images) * train_ratio)
+    train_images = images[:split_idx]
+    test_images = images[split_idx:]
+
+    for split_name, split_images in [(train_dir, train_images), (test_dir, test_images)]:
+        target_class_dir = os.path.join(split_name, class_name)
+        os.makedirs(target_class_dir, exist_ok=True)
+        for img_name in split_images:
+            src = os.path.join(class_path, img_name)
+            dst = os.path.join(target_class_dir, img_name)
+            shutil.copy(src, dst)
+
+img_shape = (64, 64)
+batch = 32
+
+img_gen = ImageDataGenerator(rescale=1/255.0)
+
+train_gen = img_gen.flow_from_directory(
+    directory=train_dir,
+    target_size=img_shape,
+    batch_size=batch,
+    class_mode='categorical',
+    shuffle=True,
+    seed=42
+)
+
+test_gen = img_gen.flow_from_directory(
+    directory=test_dir,
+    target_size=img_shape,
+    batch_size=batch,
+    class_mode='categorical',
+    shuffle=False,
+    seed=42
+)
+
+cnn_model = Sequential()
+cnn_model.add(Conv2D(32, kernel_size=(3, 3), activation='relu', input_shape=(64, 64, 3)))
+cnn_model.add(MaxPooling2D(pool_size=(2, 2)))
+cnn_model.add(Conv2D(64, kernel_size=(3, 3), activation='relu'))
+cnn_model.add(MaxPooling2D(pool_size=(2, 2)))
+cnn_model.add(Flatten())
+cnn_model.add(Dense(128, activation='relu'))
+cnn_model.add(Dropout(0.4))
+cnn_model.add(Dense(train_gen.num_classes, activation='softmax'))
+
+cnn_model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+
+history = cnn_model.fit(train_gen, epochs=15)
+
+# Evaluate on test data
+test_loss, test_accuracy = cnn_model.evaluate(test_gen)
+print(f"Test accuracy: {test_accuracy:.4f}")
+
+# Predictions and reports
+test_gen.reset()
+y_true = test_gen.classes
+y_pred_probs = cnn_model.predict(test_gen)
+y_pred = np.argmax(y_pred_probs, axis=1)
+
+print(confusion_matrix(y_true, y_pred))
+print(classification_report(y_true, y_pred))
+
+# Plot only accuracy with test accuracy as point
+plt.figure(figsize=(6, 5))
+plt.plot(history.history['accuracy'], label='Training Accuracy')
+plt.scatter(len(history.history['accuracy']) - 1, test_accuracy, color='red', label='Test Accuracy', zorder=5)
+plt.title('Accuracy (Training + Test)')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.legend()
+plt.show()
+
+# ROC and AUC calculation
+y_true_bin = label_binarize(y_true, classes=list(range(train_gen.num_classes)))
+fpr_dict, tpr_dict, auc_dict = {}, {}, {}
+
+for class_idx in range(train_gen.num_classes):
+    fpr_dict[class_idx], tpr_dict[class_idx], _ = roc_curve(y_true_bin[:, class_idx], y_pred_probs[:, class_idx])
+    auc_dict[class_idx] = auc(fpr_dict[class_idx], tpr_dict[class_idx])
+
+plt.figure(figsize=(10, 8))
+for class_idx in range(train_gen.num_classes):
+    plt.plot(fpr_dict[class_idx], tpr_dict[class_idx], label=f'Class {class_idx} (AUC={auc_dict[class_idx]:.2f})')
+
+plt.plot([0, 1], [0, 1], 'k--')
+plt.title('ROC Curves per Class')
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.legend(loc='lower right')
+plt.grid(True)
+plt.show()
